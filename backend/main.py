@@ -2,7 +2,14 @@ import os
 import json # Ajout de l'import json
 import asyncio # For running sync Gemini in async FastAPI
 import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+# Initialize Sentry BEFORE any other imports/code
+sentry_sdk.init(
+    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
+    traces_sample_rate=1.0,
+    environment=os.getenv("ENVIRONMENT", "production"),
+)
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -36,19 +43,6 @@ from typing import Optional
 
 # Charger les variables d'environnement depuis .env
 load_dotenv()
-
-# Initialize Sentry BEFORE creating FastAPI app
-sentry_sdk.init(
-    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
-    traces_sample_rate=1.0,
-    environment=os.getenv("ENVIRONMENT", "production"),
-    integrations=[
-        FastApiIntegration(
-            transaction_style="endpoint",
-            failed_request_status_codes=[403, range(500, 600)]
-        )
-    ]
-)
 
 # --- Récupérer les clés API depuis les variables d'environnement ---
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
@@ -113,15 +107,6 @@ class AnalyzeResponse(BaseModel):
 
 app = FastAPI()
 
-# Link backend traces to frontend sessions (add this middleware early)
-@app.middleware("http")
-async def link_sonarly_session(request: Request, call_next):
-    session_id = request.headers.get('x-sonarly-session-id')
-    if session_id:
-        sentry_sdk.set_tag('sonarly.session_id', session_id)
-    response = await call_next(request)
-    return response
-
 # Configuration CORS
 origins = ["*"] # Permissif pour le dev, à restreindre en prod
 
@@ -132,6 +117,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Sonarly session linking middleware - connects backend traces to frontend sessions
+@app.middleware("http")
+async def link_sonarly_session(request: Request, call_next):
+    session_id = request.headers.get("x-sonarly-session-id")
+    if session_id:
+        sentry_sdk.set_tag("sonarly.session_id", session_id)
+    return await call_next(request)
 
 @app.get("/")
 def read_root():

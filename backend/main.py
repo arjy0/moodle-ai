@@ -1,15 +1,8 @@
 import os
 import json # Ajout de l'import json
 import asyncio # For running sync Gemini in async FastAPI
-
-# Initialize Sentry BEFORE importing FastAPI
 import sentry_sdk
-sentry_sdk.init(
-    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
-    traces_sample_rate=1.0,
-    environment=os.getenv("ENVIRONMENT", "production"),
-)
-
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -43,6 +36,14 @@ from typing import Optional
 
 # Charger les variables d'environnement depuis .env
 load_dotenv()
+
+# Initialize Sentry BEFORE creating FastAPI app
+sentry_sdk.init(
+    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
+    traces_sample_rate=1.0,
+    environment=os.getenv("NODE_ENV", "production"),
+    integrations=[FastApiIntegration(transaction_style="endpoint")]
+)
 
 # --- Récupérer les clés API depuis les variables d'environnement ---
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
@@ -107,6 +108,15 @@ class AnalyzeResponse(BaseModel):
 
 app = FastAPI()
 
+# Link backend traces to frontend sessions (add this middleware early)
+@app.middleware("http")
+async def link_sonarly_session(request: Request, call_next):
+    session_id = request.headers.get("x-sonarly-session-id")
+    if session_id:
+        sentry_sdk.set_tag("sonarly.session_id", session_id)
+    response = await call_next(request)
+    return response
+
 # Configuration CORS
 origins = ["*"] # Permissif pour le dev, à restreindre en prod
 
@@ -117,15 +127,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Link backend traces to frontend sessions (add this middleware early)
-@app.middleware("http")
-async def link_sonarly_session(request: Request, call_next):
-    session_id = request.headers.get("x-sonarly-session-id")
-    if session_id:
-        sentry_sdk.set_tag("sonarly.session_id", session_id)
-    response = await call_next(request)
-    return response
 
 @app.get("/")
 def read_root():
@@ -304,10 +305,10 @@ Analysez le texte OCR suivant :
 """
 Tâche :
 1. Identifiez le langage de programmation principal (javascript, php, html, css, ou 'other' si non reconnu ou mixte).
-2. Extrayez le bloc de code principal correspondant. Le code extrait doit être une chaîne JSON valide, ce qui signifie que les backslashes (\\\\) et les guillemets (\\") doivent être échappés (\\\\\\\\ et \\\\\\") et les nouvelles lignes doivent être représentées par \\\\n.
+2. Extrayez le bloc de code principal correspondant. Le code extrait doit être une chaîne JSON valide, ce qui signifie que les backslashes (\\) et les guillemets (\\") doivent être échappés (\\\\ et \\\\") et les nouvelles lignes doivent être représentées par \\n.
 3. Répondez UNIQUEMENT avec un objet JSON contenant les clés "language" et "code".
    Exemple de réponse pour du code sur une seule ligne : {{"language": "javascript", "code": "console.log(\\'Hello World!\\');"}}
-   Exemple de réponse pour du code sur plusieurs lignes : {{"language": "php", "code": "$name = \\\\"Monde\\\\";\\\\necho \\\\"Bonjour $name!\\\\";"}}
+   Exemple de réponse pour du code sur plusieurs lignes : {{"language": "php", "code": "$name = \\"Monde\\";\\necho \\"Bonjour $name!\\";"}}
    Si aucun code n'est trouvé ou si le langage n'est pas clair, utilisez "language": "none", "code": "".
 
 JSON Réponse :
@@ -523,13 +524,13 @@ async def call_gemini_llm(prompt_content: str, is_json_output_expected: bool) ->
             
             system_prefix = ""
             if is_json_output_expected:
-                system_prefix = "Vous êtes un générateur JSON expert. Répondez UNIQUEMENT avec le JSON valide demandé. N'incluez aucun autre texte, explication ou formatage Markdown. Assurez-vous que toutes les chaînes, en particulier celles sur plusieurs lignes, sont correctement échappées selon les normes JSON.\\\\n\\\\n"
+                system_prefix = "Vous êtes un générateur JSON expert. Répondez UNIQUEMENT avec le JSON valide demandé. N'incluez aucun autre texte, explication ou formatage Markdown. Assurez-vous que toutes les chaînes, en particulier celles sur plusieurs lignes, sont correctement échappées selon les normes JSON.\\n\\n"
                 generation_config = genai.types.GenerationConfig(
                     response_mime_type="application/json",
                     temperature=0.0
                 )
             else:
-                system_prefix = "Vous êtes un assistant utile.\\\\n\\\\n"
+                system_prefix = "Vous êtes un assistant utile.\\n\\n"
                 generation_config = genai.types.GenerationConfig(
                     temperature=0.0
                 )
@@ -561,17 +562,17 @@ async def call_gemini_llm(prompt_content: str, is_json_output_expected: bool) ->
                         repaired_json = repaired_json[:-3].rstrip()
                         print(f"  Réparation (suppression \'...\'): \'{repaired_json[:100]}...\'")
 
-                    if '\\\\n' in repaired_json and not re.search(r'(?<!\\\\)\\\\n', repaired_json.replace('\\\\\\\\','')):
+                    if '\\n' in repaired_json and not re.search(r'(?<!\\)\\n', repaired_json.replace('\\\\','')):
                          pass 
                     elif '\\n' in repaired_json:
-                        repaired_json = repaired_json.replace('\\n', '\\\\\\\\n')
-                        print(f"  Réparation (remplacement \\\\n -> \\\\\\\\\\\\n): \'{repaired_json[:100]}...\'")
+                        repaired_json = repaired_json.replace('\\n', '\\\\n')
+                        print(f"  Réparation (remplacement \\n -> \\\\\\n): \'{repaired_json[:100]}...\'")
                     
-                    if '\\\\r' in repaired_json and not re.search(r'(?<!\\\\)\\\\r', repaired_json.replace('\\\\\\\\','')):
+                    if '\\r' in repaired_json and not re.search(r'(?<!\\)\\r', repaired_json.replace('\\\\','')):
                          pass
                     elif '\\r' in repaired_json:
-                        repaired_json = repaired_json.replace('\\r', '\\\\\\\\r')
-                        print(f"  Réparation (remplacement \\\\r -> \\\\\\\\\\\\r): \'{repaired_json[:100]}...\'")
+                        repaired_json = repaired_json.replace('\\r', '\\\\r')
+                        print(f"  Réparation (remplacement \\r -> \\\\\\r): \'{repaired_json[:100]}...\'")
 
                     try:
                         json.loads(repaired_json)

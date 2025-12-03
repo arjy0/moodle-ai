@@ -1,8 +1,6 @@
 import os
 import json # Ajout de l'import json
 import asyncio # For running sync Gemini in async FastAPI
-import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastApiIntegration
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,6 +12,22 @@ from mistralai import Mistral # Kept for OCR
 # from groq import Groq # To be replaced by Gemini
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
+
+# --- Initialize Sentry BEFORE everything else ---
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+
+# Load environment variables first to get NODE_ENV if needed
+load_dotenv()
+
+sentry_sdk.init(
+    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
+    traces_sample_rate=1.0,
+    environment=os.getenv("NODE_ENV", "production"),
+    integrations=[
+        FastApiIntegration(transaction_style="endpoint"),
+    ]
+)
 
 # --- Importer les exceptions spécifiques ---
 # Importer `models` pour accéder aux exceptions SDKError et HTTPValidationError
@@ -33,17 +47,6 @@ import re
 
 # Importer Optional depuis typing
 from typing import Optional
-
-# Charger les variables d'environnement depuis .env
-load_dotenv()
-
-# Initialize Sentry BEFORE creating FastAPI app
-sentry_sdk.init(
-    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
-    traces_sample_rate=1.0,
-    environment=os.getenv("NODE_ENV", "production"),
-    integrations=[FastApiIntegration(transaction_style="endpoint")]
-)
 
 # --- Récupérer les clés API depuis les variables d'environnement ---
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
@@ -108,15 +111,6 @@ class AnalyzeResponse(BaseModel):
 
 app = FastAPI()
 
-# Link backend traces to frontend sessions (add this middleware early)
-@app.middleware("http")
-async def link_sonarly_session(request: Request, call_next):
-    session_id = request.headers.get("x-sonarly-session-id")
-    if session_id:
-        sentry_sdk.set_tag("sonarly.session_id", session_id)
-    response = await call_next(request)
-    return response
-
 # Configuration CORS
 origins = ["*"] # Permissif pour le dev, à restreindre en prod
 
@@ -127,6 +121,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Session Linking Middleware ---
+# Link backend traces to frontend sessions (MUST be after CORS but before routes)
+@app.middleware("http")
+async def link_sonarly_session(request: Request, call_next):
+    session_id = request.headers.get('x-sonarly-session-id')
+    if session_id:
+        sentry_sdk.set_tag('sonarly.session_id', session_id)
+    response = await call_next(request)
+    return response
 
 @app.get("/")
 def read_root():
@@ -305,7 +309,7 @@ Analysez le texte OCR suivant :
 """
 Tâche :
 1. Identifiez le langage de programmation principal (javascript, php, html, css, ou 'other' si non reconnu ou mixte).
-2. Extrayez le bloc de code principal correspondant. Le code extrait doit être une chaîne JSON valide, ce qui signifie que les backslashes (\\) et les guillemets (\\") doivent être échappés (\\\\ et \\\\") et les nouvelles lignes doivent être représentées par \\n.
+2. Extrayez le bloc de code principal correspondant. Le code extrait doit être une chaîne JSON valide, ce qui signifie que les backslashes (\\) et les guillemets (") doivent être échappés (\\\\ et \\") et les nouvelles lignes doivent être représentées par \\n.
 3. Répondez UNIQUEMENT avec un objet JSON contenant les clés "language" et "code".
    Exemple de réponse pour du code sur une seule ligne : {{"language": "javascript", "code": "console.log(\\'Hello World!\\');"}}
    Exemple de réponse pour du code sur plusieurs lignes : {{"language": "php", "code": "$name = \\"Monde\\";\\necho \\"Bonjour $name!\\";"}}
@@ -356,9 +360,9 @@ JSON Réponse :
                     prompt_final_answer_code = f"""
 Contexte: Le code {lang_name_for_prompt} suivant a été exécuté :
 Code Exécuté :
-\`\`\`{detected_language}
+```{detected_language}
 {exec_result['formatted_code']}
-\`\`\`
+```
 Sortie d'Exécution :
 {exec_result['output'] if exec_result['output'] else 'Aucune sortie'}
 Nombre de lignes attendues par l'utilisateur : {expected_lines}
@@ -384,9 +388,9 @@ Réponse :
                         prompt_fix_code = f"""
 Le code {lang_name_for_prompt} suivant a produit une erreur :
 Code Échoué :
-\`\`\`{detected_language}
+```{detected_language}
 {exec_result['formatted_code']}
-\`\`\`
+```
 Erreur d'Exécution ({exec_result['status']}) :
 {exec_result['output']}
 
@@ -416,9 +420,9 @@ Code Corrigé :
             # Prompt pour HTML/CSS
             prompt_format_describe_static = f"""
 Le code {lang_name_for_prompt} suivant a été extrait :
-\`\`\`{detected_language}
+```{detected_language}
 {current_code_to_process}
-\`\`\`
+```
 Tâche:
 1. Formattez ce code {lang_name_for_prompt} proprement.
 2. Fournissez une brève description de ce que fait ce code ou de ce qu'il représente.
@@ -564,14 +568,14 @@ async def call_gemini_llm(prompt_content: str, is_json_output_expected: bool) ->
 
                     if '\\n' in repaired_json and not re.search(r'(?<!\\)\\n', repaired_json.replace('\\\\','')):
                          pass 
-                    elif '\\n' in repaired_json:
-                        repaired_json = repaired_json.replace('\\n', '\\\\n')
+                    elif '\n' in repaired_json:
+                        repaired_json = repaired_json.replace('\n', '\\\\n')
                         print(f"  Réparation (remplacement \\n -> \\\\\\n): \'{repaired_json[:100]}...\'")
                     
                     if '\\r' in repaired_json and not re.search(r'(?<!\\)\\r', repaired_json.replace('\\\\','')):
                          pass
-                    elif '\\r' in repaired_json:
-                        repaired_json = repaired_json.replace('\\r', '\\\\r')
+                    elif '\r' in repaired_json:
+                        repaired_json = repaired_json.replace('\r', '\\\\r')
                         print(f"  Réparation (remplacement \\r -> \\\\\\r): \'{repaired_json[:100]}...\'")
 
                     try:
@@ -724,7 +728,7 @@ def run_php_code(code):
         'status': 'not_executed'
     }
     temp_filepath = None
-    php_executable_path = os.getenv("PHP_EXECUTABLE_PATH", r"C:\\xampp\\php\\php.exe") # Read from .env or default
+    php_executable_path = os.getenv("PHP_EXECUTABLE_PATH", r"C:\xampp\php\php.exe") # Read from .env or default
 
     try:
         # --- Check if PHP executable exists ---
@@ -779,4 +783,5 @@ def run_php_code(code):
 if __name__ == "__main__":
     import uvicorn
     print("Lancement du serveur FastAPI sur http://0.0.0.0:8000")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
+</content>

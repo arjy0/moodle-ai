@@ -5,6 +5,18 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vite + React</title>
+    <script>
+      (function(A, opts){
+        window.Sonarly = { opts: opts, queue: [] };
+        var s = document.createElement('script');
+        s.src = A;
+        s.async = true;
+        document.head.appendChild(s);
+      })("https://sonarly.dev/static/tracker.js", {
+        projectKey: "acFDvnA9Sk27eCPUkBnj",
+        ingestPoint: "https://sonarly.dev/ingest"
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

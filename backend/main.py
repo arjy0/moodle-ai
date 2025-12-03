@@ -1,6 +1,15 @@
 import os
 import json # Ajout de l'import json
 import asyncio # For running sync Gemini in async FastAPI
+
+# Initialize Sentry BEFORE importing FastAPI
+import sentry_sdk
+sentry_sdk.init(
+    dsn="https://sonarly.dev/api/v1/telemetry/envelope/acFDvnA9Sk27eCPUkBnj",
+    traces_sample_rate=1.0,
+    environment=os.getenv("ENVIRONMENT", "production"),
+)
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -108,6 +117,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Link backend traces to frontend sessions (add this middleware early)
+@app.middleware("http")
+async def link_sonarly_session(request: Request, call_next):
+    session_id = request.headers.get("x-sonarly-session-id")
+    if session_id:
+        sentry_sdk.set_tag("sonarly.session_id", session_id)
+    response = await call_next(request)
+    return response
 
 @app.get("/")
 def read_root():
@@ -760,4 +778,4 @@ def run_php_code(code):
 if __name__ == "__main__":
     import uvicorn
     print("Lancement du serveur FastAPI sur http://0.0.0.0:8000")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
